@@ -6,9 +6,9 @@ import json
 class AddressMatcher:
     def __init__(self, xa_file, huyen_file, tinh_file):
         self.data = {
-            'xa': set(self.load_data(xa_file)),
-            'huyen': set(self.load_data(huyen_file)),
-            'tinh': set(self.load_data(tinh_file))
+            'ward': set(self.load_data(xa_file)),
+            'district': set(self.load_data(huyen_file)),
+            'province': set(self.load_data(tinh_file))
         }
         self.cache = {}
 
@@ -41,7 +41,7 @@ class AddressMatcher:
             if score < best_score:
                 best_score = score
                 best_match = item
-        return best_match if best_score <= len(normalized_part) / 2 else None
+        return best_match if best_score <= (len(normalized_part) / 100 * 60) else None
 
     def levenshtein_distance(self, s1, s2):
         if len(s1) < len(s2):
@@ -63,40 +63,75 @@ class AddressMatcher:
         if input_address in self.cache:
             return self.cache[input_address]
 
-        parts = [part.strip() for part in re.split(r'[,.]', input_address) if part.strip()]
-        result = {'tinh': '', 'huyen': '', 'xa': ''}
+        result = {
+            'province': None,
+            'district': None,
+            'ward': None
+        }
 
-        # Handle the "happy case" of three-part addresses
+        parts = self.parse_vn_geo_structured(input_address)
+
         if len(parts) == 3:
-            result['xa'] = self.find_exact_match(parts[0], 'xa') or self.find_best_match(parts[0], 'xa') or ''
-            result['huyen'] = self.find_exact_match(parts[1], 'huyen') or self.find_best_match(parts[1], 'huyen') or ''
-            result['tinh'] = self.find_exact_match(parts[2], 'tinh') or self.find_best_match(parts[2], 'tinh') or ''
+            result['ward'] = self.find_exact_match(parts['ward'], 'ward') or self.find_best_match(parts['ward'], 'ward') or ''
+            result['district'] = self.find_exact_match(parts['district'], 'district') or self.find_best_match(parts['district'], 'district') or ''
+            result['province'] = self.find_exact_match(parts['province'], 'province') or self.find_best_match(parts['province'], 'province') or ''
         else:
-            # Start from the end for other cases
-            for i, part in enumerate(reversed(parts)):
-                normalized = re.sub(r'^(X\.|Xã|H\.|Huyện|TT\.|Thị Trấn|TP\.|Tỉnh|P\.|Phường|Q\.|Quận)\s*', '', part,
-                                    flags=re.IGNORECASE)
-
-                if i == 0 and not result['tinh']:
-                    result['tinh'] = self.find_exact_match(normalized, 'tinh') or self.find_best_match(normalized,
-                                                                                                       'tinh') or ''
-                elif i == 1 and not result['huyen']:
-                    result['huyen'] = self.find_exact_match(normalized, 'huyen') or self.find_best_match(normalized,
-                                                                                                         'huyen') or ''
-                elif i == 2 and not result['xa']:
-                    result['xa'] = self.find_exact_match(normalized, 'xa') or self.find_best_match(normalized,
-                                                                                                   'xa') or ''
-
-                if result['tinh'] and result['huyen'] and result['xa']:
-                    break
+            result = {
+                'province': self.find_exact_match(input_address, 'xa') or self.find_best_match(input_address, 'xa') or '',
+                'district': self.find_exact_match(input_address, 'huyen') or self.find_best_match(input_address,
+                                                                                                  'huyen') or '',
+                'ward': self.find_exact_match(input_address, 'tinh') or self.find_best_match(input_address, 'tinh') or ''}
 
         output = {
-            'province': result['tinh'],
-            'district': result['huyen'],
-            'ward': result['xa']
+            'province': result['province'],
+            'district': result['district'],
+            'ward': result['ward']
         }
         self.cache[input_address] = output
         return output
+
+    def parse_vn_geo_structured(self, text):
+        text = text.strip()
+
+        # Initialize result
+        result = {
+            "province": None,
+            "district": None,
+            "ward": None
+        }
+
+        # Split by comma first (province is usually after last comma)
+        parts = [p.strip() for p in text.split(',')]
+
+        # Get province (rightmost part) - handle TP.HoChiMinh case
+        if parts:
+            result["province"] = parts[-1].strip().strip('.')
+
+        # Get the remaining text (everything before province)
+        remaining = ','.join(parts[:-1]) if len(parts) > 1 else parts[0]
+
+        # Enhanced district pattern - handle Q3, Quận 3 cases
+        district_pattern = r'(?:Huyện| H\.|,H\.|,H | H |Quận |Q\.|Q |[Qq](?=\d{1,2}(?:\s|$|\.|,))|Thị xã|TX|TX\.)\s*([^,]+?)(?=\s*(?:TT|Thị Trấn|X |X\.|Xã|P|Phường|$))'
+        district_match = re.search(district_pattern, remaining, re.IGNORECASE)
+        if district_match:
+            district = district_match.group(1).strip()
+            # Clean up district number
+            if district.isdigit() or (len(district) > 1 and district[0].isdigit()):
+                district = district.split()[0]  # Take only the number part
+            result["district"] = district
+            remaining = remaining[:district_match.start()].strip()
+
+        # Enhanced ward pattern - handle P1, Phường 1 cases
+        ward_pattern = r'(?:TT|,TT\.|,TT | TT |Thị Trấn|,X\.| X | X\. | X\.|Xã|,P(?=\d{1,2}(?:\s|$|\.|,))| P(?=\d{1,2}(?:\s|$|\.|,))|,P\.| P\.| P | P\. |Phường)\s*([^,]+?)(?=\s*(?:Huyện| H\.|,H\.|,H | H |Quận|Q.|Q |Thị xã|TX|TX.|$))'
+        ward_match = re.search(ward_pattern, remaining, re.IGNORECASE)
+        if ward_match:
+            ward = ward_match.group(1).strip()
+            # Clean up ward number
+            if ward.isdigit() or (len(ward) > 1 and ward[0].isdigit()):
+                ward = ward.split()[0]  # Take only the number part
+            result["ward"] = ward
+
+        return result
 
 
 # Helper function to load test cases
