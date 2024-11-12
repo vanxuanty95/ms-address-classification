@@ -10,6 +10,7 @@ class TestAddressMatcher(unittest.TestCase):
         # Initialize the AddressMatcher with your data files
         cls.solution = AddressMatcher('list_ward.txt', 'list_district.txt', 'list_province.txt')
         cls.test_cases = load_test_cases('public.json')
+        # cls.test_cases = load_test_cases('public-test.json')
 
     def test_match_address(self):
         summary_only = True
