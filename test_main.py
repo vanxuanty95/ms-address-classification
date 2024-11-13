@@ -28,10 +28,10 @@ class TestAddressMatcher(unittest.TestCase):
                 finish = time.perf_counter_ns()
                 timer.append(finish - start)
 
-                # if answer["province"] != result["province"] or answer["district"] != result["district"] or answer["ward"] != result["ward"]:
-                #     print(f"=====\n{address}")
-                #     print(f"{answer}")
-                #     print(f"{result}")
+                if answer["province"] != result["province"] or answer["district"] != result["district"] or answer["ward"] != result["ward"]:
+                    print(f"=====\n{address}")
+                    print(f"{answer}")
+                    print(f"{result}")
 
                 ok += int(answer["province"] == result["province"])
                 ok += int(answer["district"] == result["district"])

@@ -1,6 +1,7 @@
 import json
 import re
 import signal
+from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, List, Optional
 
@@ -126,9 +127,18 @@ class AddressMatcher:
 
     def _init_lookup_maps(self):
         """Initialize normalized lookup maps for faster matching"""
-        self.normalized_provinces = {self.normalize(p): p for p in self.data['province']}
-        self.normalized_districts = {self.normalize(d): d for d in self.data['district']}
-        self.normalized_wards = {self.normalize(w): w for w in self.data['ward']}
+        # Create dictionaries grouped by length for each level
+        self.length_maps = {
+            'province': defaultdict(list),
+            'district': defaultdict(list),
+            'ward': defaultdict(list)
+        }
+
+        # Group items by their normalized length
+        for level in ['province', 'district', 'ward']:
+            for item in self.data[level]:
+                norm_item = self.normalize(item)
+                self.length_maps[level][len(norm_item)].append((item, norm_item))
 
     @lru_cache(maxsize=10000)
     def normalize(self, text: str) -> str:
@@ -167,9 +177,8 @@ class AddressMatcher:
             if normalized_part in normalized_items:
                 return normalized_items[normalized_part]
         else:
-            lookup_map = getattr(self, f'normalized_{level}s')
-            if normalized_part in lookup_map:
-                return lookup_map[normalized_part]
+            if normalized_part in self.length_maps[level]:
+                return self.length_maps[level]
 
         # Fall back to fuzzy matching
         candidates = []
@@ -199,25 +208,28 @@ class AddressMatcher:
             return candidates[0]['item']
 
         # move to stress search
+        normalized_part = self.normalize(part)
+        part_length = len(normalized_part)
         candidates = []
-        items_to_check = self.data[level]
 
-        for item in items_to_check:
-            normalized_item = self.normalize(item)
+        # Only check items with similar lengths (±2)
+        for length in range(part_length - 2, part_length + 3):
+            # Get items of this length from our precomputed map
+            for item, normalized_item in self.length_maps[level][length]:
+                score = self.levenshtein_distance(normalized_part, normalized_item)
+                max_length = max(part_length, length)
+                similarity = (max_length - score) / max_length * 100
 
-            if abs(len(normalized_part) - len(normalized_item)) > 2:
-                continue
+                if similarity >= 80:
+                    candidates.append({
+                        'item': item,
+                        'score': score,
+                        'similarity': similarity
+                    })
 
-            score = self.levenshtein_distance(normalized_part, normalized_item)
-            max_length = max(len(normalized_part), len(normalized_item))
-            similarity = (max_length - score) / max_length * 100
-
-            if similarity >= 80:
-                candidates.append({
-                    'item': item,
-                    'score': score,
-                    'similarity': similarity
-                })
+                # Optional: Early return if we find a perfect match
+                if similarity == 100:
+                    return item
 
         if candidates:
             candidates.sort(key=lambda x: (x['score'], -x['similarity']))
@@ -262,7 +274,7 @@ class AddressMatcher:
             return result
         except TimeoutError:
             return {
-            'province': '',
+            'province': 'overtime',
             'district': '',
             'ward': ''
         }
