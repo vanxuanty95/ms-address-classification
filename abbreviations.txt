@@ -2,6 +2,7 @@ HN,Hà Nội
 H.Nội,Hà Nội
 HCM,Hồ Chí Minh
 TPHCM,Hồ Chí Minh
+H.C.Minh,Hồ Chí Minh
 SG,Hồ Chí Minh
 HP,Hải Phòng
 H.Phòng,Hải Phòng

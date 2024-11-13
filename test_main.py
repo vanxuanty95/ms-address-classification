@@ -23,15 +23,15 @@ class TestAddressMatcher(unittest.TestCase):
             ok = 0
             try:
                 start = time.perf_counter_ns()
-                result = self.solution.match_address(address)
+                result = self.solution.process(address)
                 answer = data_point["result"]
                 finish = time.perf_counter_ns()
                 timer.append(finish - start)
 
-                if answer["province"] != result["province"] or answer["district"] != result["district"] or answer["ward"] != result["ward"]:
-                    print(f"=====\n{address}")
-                    print(f"{answer}")
-                    print(f"{result}")
+                # if answer["province"] != result["province"] or answer["district"] != result["district"] or answer["ward"] != result["ward"]:
+                #     print(f"=====\n{address}")
+                #     print(f"{answer}")
+                #     print(f"{result}")
 
                 ok += int(answer["province"] == result["province"])
                 ok += int(answer["district"] == result["district"])

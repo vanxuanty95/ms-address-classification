@@ -1,129 +1,151 @@
-import re
 import json
+import re
+import signal
+from functools import lru_cache
+from typing import Dict, List, Optional
+
+
+class Ward:
+    __slots__ = ['id', 'name', 'code', 'district_id']
+
+    def __init__(self, id: str, name: str, code: str, district_id: str):
+        self.id = id
+        self.name = name
+        self.code = code
+        self.district_id = district_id
+
+
+class District:
+    __slots__ = ['id', 'name', 'code', 'province_id', 'wards']
+
+    def __init__(self, id: str, name: str, code: str, province_id: str):
+        self.id = id
+        self.name = name
+        self.code = code
+        self.province_id = province_id
+        self.wards = {}
+
+
+class Province:
+    __slots__ = ['id', 'name', 'code', 'districts']
+
+    def __init__(self, id: str, name: str, code: str):
+        self.id = id
+        self.name = name
+        self.code = code
+        self.districts = {}
 
 
 class AddressMatcher:
-    def __init__(self, xa_file, huyen_file, tinh_file):
+    # Vietnamese character mappings
+    VIET_CHARS = {
+        'đ': 'd', 'Đ': 'D',
+        'á': 'a', 'à': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
+        'ă': 'a', 'ắ': 'a', 'ằ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
+        'â': 'a', 'ấ': 'a', 'ầ': 'a', 'ẩ': 'a', 'ẫ': 'a', 'ậ': 'a',
+        'é': 'e', 'è': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ẹ': 'e',
+        'ê': 'e', 'ế': 'e', 'ề': 'e', 'ể': 'e', 'ễ': 'e', 'ệ': 'e',
+        'í': 'i', 'ì': 'i', 'ỉ': 'i', 'ĩ': 'i', 'ị': 'i',
+        'ó': 'o', 'ò': 'o', 'ỏ': 'o', 'õ': 'o', 'ọ': 'o',
+        'ô': 'o', 'ố': 'o', 'ồ': 'o', 'ổ': 'o', 'ỗ': 'o', 'ộ': 'o',
+        'ơ': 'o', 'ớ': 'o', 'ờ': 'o', 'ở': 'o', 'ỡ': 'o', 'ợ': 'o',
+        'ú': 'u', 'ù': 'u', 'ủ': 'u', 'ũ': 'u', 'ụ': 'u',
+        'ư': 'u', 'ứ': 'u', 'ừ': 'u', 'ử': 'u', 'ữ': 'u', 'ự': 'u',
+        'ý': 'y', 'ỳ': 'y', 'ỷ': 'y', 'ỹ': 'y', 'ỵ': 'y'
+    }
+
+    # Address cleaning replacements
+    REPLACEMENTS = {
+        'TP.': ' ', 'TP ': ' ', 'ThP ': ' ', 'Thành Phố ': ' ', 'Thành phố ': ' ', 'thành phố ': ' ',
+        'Thà6nh phố': ' ','Tỉnh': ' ','t.P': ' ','T.P': ' ','T0P': ' ',
+        'Tnh': ' ', 'TỉnhC': ' ', 'tỉnh ': ' ', 'Tỉnh ': ' ', 'tp.': ' ', 'tp ': ' ', 'T ': ' ',
+        'Quận ': ' ', 'Quận': ' ', 'Q.': ' ', 'Q ': ' ', 'quận': ' ',
+        'Huyện ': ' ', 'H.': ' ', 'H ': ' ', 'huyện ': ' ', 'Huyện': ' ', 'huyện': ' ',
+        'hyện': ' ','HZuyện': ' ','Huyên': ' ','Huzyen': ' ','h ': ' ',
+        'Thị Trấn ': ' ', 'thị trấn ': ' ', 'Thị Trấn': ' ', 'thị trấn': ' ', 'Thị trấn': ' ', 'TT.': ' ', 'TT ': ' ',
+        'Thi trấ ': ' ',
+        'Thị Xã ': ' ', 'thị xã ': ' ', 'TX.': ' ', 'TX ': ' ', 'Thị xã ': ' ','T.X': ' ',
+        'Phường ': ' ', 'phường ': ' ', 'Ph.': ' ', 'P.': ' ', 'P ': ' ', 'F ': ' ', 'f ': ' ', 'F. ': ' ',
+        'Phường': ' ',
+        'F.': ' ', 'f': ' ', 'f.': ' ','F': ' ',
+        'Xã ': ' ', 'Xã': ' ', 'xã ': ' ', 'xã': ' ', 'X.': ' ', 'X ': ' ', 'x.': ' ', 'x ': ' ',
+        'Phuong ': ' ', 'phuong ': ' ', 'Xa ': ' ', 'xa ': ' ',
+        'Huyen ': ' ', 'huyen ': ' ', 'Tinh ': ' ', 'tinh ': ' ',
+
+         '.': ' ', ',': ' ', '-': ' ', '_': ' ',
+    }
+
+    def __init__(self, xa_file: str, huyen_file: str, tinh_file: str):
+        # Initialize data structures
         self.data = {
             'ward': set(self.load_data(xa_file)),
             'district': set(self.load_data(huyen_file)),
             'province': set(self.load_data(tinh_file))
         }
-        self.provinces = {}
 
+        # Initialize lookup maps
+        self.provinces = {}
+        self.cache = {}
+        self.abbreviations = self._load_abbreviations()
+
+        # Precompile regex patterns
+        self.admin_indicators = re.compile(r'^.*?(Thị\s*[Tt]rấn|TT|Phường|P|Ph?|[Xx]ã)\.?\s+')
+        self.p_patterns = [
+            re.compile(p) for p in [
+                r'P\.?\s*(\d+)',
+                r'Ph\.?\s*(\d+)',
+                r'[Pp]hường\s*(\d+)',
+                r'Q\.?\s*(\d+)',
+                r'[Qq]uận\s*(\d+)'
+            ]
+        ]
+
+        # Create normalized lookup maps
+        self._init_lookup_maps()
+
+        # Load hierarchical data
         self.load_own_file('wards_with_code.txt', 'districts_with_code.txt', 'provinces_with_code.txt')
 
-        self.cache = {}
-        self.abbreviations = {}
-        self.load_abbreviations()
-
-    def load_data(self, filename):
+    @staticmethod
+    def load_data(filename: str) -> List[str]:
+        result = []
         with open(filename, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f]
+            for line in f:
+                stripped_line = line.strip()
+                if stripped_line:  # Skip empty or whitespace-only lines
+                    result.append(stripped_line)
+        return result
 
-    def load_abbreviations(self):
-        # Load abbreviations from txt file into dictionary
-        self.abbreviations = {}
+    def _load_abbreviations(self) -> Dict[str, str]:
+        abbreviations = {}
         with open('abbreviations.txt', 'r', encoding='utf-8') as file:
             for line in file:
                 abbr, full = line.strip().split(',')
-                self.abbreviations[abbr] = full
+                abbreviations[abbr] = full
+        return abbreviations
 
-    def normalize(self, text):
-        # Define Vietnamese character mappings
-        vietnamese_map = {
-            'đ': 'd',
-            'Đ': 'D',
-            'á': 'a', 'à': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
-            'ă': 'a', 'ắ': 'a', 'ằ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
-            'â': 'a', 'ấ': 'a', 'ầ': 'a', 'ẩ': 'a', 'ẫ': 'a', 'ậ': 'a',
-            'é': 'e', 'è': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ẹ': 'e',
-            'ê': 'e', 'ế': 'e', 'ề': 'e', 'ể': 'e', 'ễ': 'e', 'ệ': 'e',
-            'í': 'i', 'ì': 'i', 'ỉ': 'i', 'ĩ': 'i', 'ị': 'i',
-            'ó': 'o', 'ò': 'o', 'ỏ': 'o', 'õ': 'o', 'ọ': 'o',
-            'ô': 'o', 'ố': 'o', 'ồ': 'o', 'ổ': 'o', 'ỗ': 'o', 'ộ': 'o',
-            'ơ': 'o', 'ớ': 'o', 'ờ': 'o', 'ở': 'o', 'ỡ': 'o', 'ợ': 'o',
-            'ú': 'u', 'ù': 'u', 'ủ': 'u', 'ũ': 'u', 'ụ': 'u',
-            'ư': 'u', 'ứ': 'u', 'ừ': 'u', 'ử': 'u', 'ữ': 'u', 'ự': 'u',
-            'ý': 'y', 'ỳ': 'y', 'ỷ': 'y', 'ỹ': 'y', 'ỵ': 'y'
-        }
+    def _init_lookup_maps(self):
+        """Initialize normalized lookup maps for faster matching"""
+        self.normalized_provinces = {self.normalize(p): p for p in self.data['province']}
+        self.normalized_districts = {self.normalize(d): d for d in self.data['district']}
+        self.normalized_wards = {self.normalize(w): w for w in self.data['ward']}
 
-        # Convert to lowercase
+    @lru_cache(maxsize=10000)
+    def normalize(self, text: str) -> str:
+        """Normalize text with caching"""
         text = text.lower()
+        for viet_char, ascii_char in self.VIET_CHARS.items():
+            text = text.replace(viet_char, ascii_char)
+        return re.sub(r'[^a-z0-9\s]', '', text)
 
-        # Replace Vietnamese characters
-        for vietnamese_char, ascii_char in vietnamese_map.items():
-            text = text.replace(vietnamese_char, ascii_char)
-
-        # Remove non-alphanumeric characters
-        text = re.sub(r'[^a-z0-9\s]', '', text)
-
-        return text
-
-    def find_exact_match(self, part, level):
-        normalized_part = self.normalize(part)
-        for item in self.data[level]:
-            if self.normalize(item) == normalized_part:
-                return item
-        return None
-
-    def find_best_match(self, part, level, in_scope):
-        candidates = []  # List to store all candidates with their scores
-        normalized_part = self.normalize(part)
-
-        if in_scope is not None:
-            for item in in_scope.values():
-                normalized_item = self.normalize(item.name)
-
-                # Skip if length difference is too big
-                if abs(len(normalized_part) - len(normalized_item)) > 2:
-                    continue
-
-                score = self.levenshtein_distance(normalized_part, normalized_item)
-
-                # Calculate similarity percentage
-                max_length = max(len(normalized_part), len(normalized_item))
-                similarity = (max_length - score) / max_length * 100
-
-                if similarity >= 80:  # Require 80% similarity
-                    candidates.append({
-                        'item': item.name,
-                        'score': score,
-                        'similarity': similarity
-                    })
-        else:
-            for item in self.data[level]:
-                normalized_item = self.normalize(item)
-
-                # Skip if length difference is too big
-                if abs(len(normalized_part) - len(normalized_item)) > 2:
-                    continue
-
-                score = self.levenshtein_distance(normalized_part, normalized_item)
-
-                # Calculate similarity percentage
-                max_length = max(len(normalized_part), len(normalized_item))
-                similarity = (max_length - score) / max_length * 100
-
-                if similarity >= 80:  # Require 80% similarity
-                    candidates.append({
-                        'item': item,
-                        'score': score,
-                        'similarity': similarity
-                    })
-
-        # Sort candidates by score (ascending) and similarity (descending)
-        if candidates:
-            candidates.sort(key=lambda x: (x['score'], -x['similarity']))
-            return candidates[0]['item']  # Return the first (best) match
-
-        return None
-
-    def levenshtein_distance(self, s1, s2):
+    @lru_cache(maxsize=1000)
+    def levenshtein_distance(self, s1: str, s2: str) -> int:
+        """Calculate Levenshtein distance with caching"""
         if len(s1) < len(s2):
             return self.levenshtein_distance(s2, s1)
         if len(s2) == 0:
             return len(s1)
+
         previous_row = range(len(s2) + 1)
         for i, c1 in enumerate(s1):
             current_row = [i + 1]
@@ -135,181 +157,173 @@ class AddressMatcher:
             previous_row = current_row
         return previous_row[-1]
 
-    def match_address(self, input_address):
+    def find_best_match(self, part: str, level: str, in_scope) -> Optional[str]:
+        """Find best matching address component"""
+        normalized_part = self.normalize(part)
+
+        # Try exact match first
+        if in_scope is not None:
+            normalized_items = {self.normalize(item.name): item.name for item in in_scope.values()}
+            if normalized_part in normalized_items:
+                return normalized_items[normalized_part]
+        else:
+            lookup_map = getattr(self, f'normalized_{level}s')
+            if normalized_part in lookup_map:
+                return lookup_map[normalized_part]
+
+        # Fall back to fuzzy matching
+        candidates = []
+        items_to_check = in_scope.values() if in_scope is not None else self.data[level]
+
+        for item in items_to_check:
+            item_name = item.name if in_scope is not None else item
+            normalized_item = self.normalize(item_name)
+
+
+            if abs(len(normalized_part) - len(normalized_item)) > 2:
+                continue
+
+            score = self.levenshtein_distance(normalized_part, normalized_item)
+            max_length = max(len(normalized_part), len(normalized_item))
+            similarity = (max_length - score) / max_length * 100
+
+            if similarity >= 80:
+                candidates.append({
+                    'item': item_name,
+                    'score': score,
+                    'similarity': similarity
+                })
+
+        if candidates:
+            candidates.sort(key=lambda x: (x['score'], -x['similarity']))
+            return candidates[0]['item']
+
+        # move to stress search
+        candidates = []
+        items_to_check = self.data[level]
+
+        for item in items_to_check:
+            normalized_item = self.normalize(item)
+
+            if abs(len(normalized_part) - len(normalized_item)) > 2:
+                continue
+
+            score = self.levenshtein_distance(normalized_part, normalized_item)
+            max_length = max(len(normalized_part), len(normalized_item))
+            similarity = (max_length - score) / max_length * 100
+
+            if similarity >= 80:
+                candidates.append({
+                    'item': item,
+                    'score': score,
+                    'similarity': similarity
+                })
+
+        if candidates:
+            candidates.sort(key=lambda x: (x['score'], -x['similarity']))
+            return candidates[0]['item']
+
+        return None
+
+    @lru_cache(maxsize=1000)
+    def clean_address(self, address: str) -> str:
+        """Clean address string with caching"""
+        cleaned = address
+
+        # Apply replacements
+        for old, new in self.REPLACEMENTS.items():
+            cleaned = cleaned.replace(old, new)
+
+        # Handle administrative indicators
+        match = self.admin_indicators.search(cleaned)
+        if match:
+            cleaned = cleaned[match.end():].strip()
+
+        # Apply number patterns
+        for pattern in self.p_patterns:
+            cleaned = pattern.sub(r'\1', cleaned)
+
+        return ' '.join(cleaned.split())
+
+    def process(self, address: str):
+        return self.run_with_timeout(self.match_address, address)
+
+    def run_with_timeout(self, func, address, timeout=0.09):
+        def timeout_handler(signum, frame):
+            raise TimeoutError()
+
+        # Set signal handler
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+
+        try:
+            result = func(address)
+            signal.setitimer(signal.ITIMER_REAL, 0)  # Disable timer
+            return result
+        except TimeoutError:
+            return {
+            'province': '',
+            'district': '',
+            'ward': ''
+        }
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def match_address(self, input_address: str) -> Dict[str, str]:
+        """Match address components with caching"""
         if input_address in self.cache:
             return self.cache[input_address]
 
         result = {
-            'province': None,
-            'district': None,
-            'ward': None
+            'province': '',
+            'district': '',
+            'ward': ''
         }
 
         input_address = self.clean_address(input_address)
-
-        province = None
-        district = None
-
         words = input_address.split()
+
+        # Find province
+        province = None
         for i in range(len(words)):
             new_string = ' '.join(words[-(i + 1):])
-            remain = words[:len(words) - (i + 1)]
-
             if len(new_string) <= 7:
-                for abbr, full_name in self.abbreviations.items():
-                    if new_string == abbr:
-                        new_string = full_name
-                        break
+                new_string = self.abbreviations.get(new_string, new_string)
 
-            result_sub = self.find_best_match(new_string, 'province', None)
-
-            if result_sub:  # If a match is found
-                words = remain
-                result['province'] = result_sub
-                for province in self.provinces.values():
-                    if province.name == result_sub:
-                        province = province
-                        break
+            province_match = self.find_best_match(new_string, 'province', None)
+            if province_match:
+                result['province'] = province_match
+                words = words[:len(words) - (i + 1)]
+                province = next((p for p in self.provinces.values() if p.name == province_match), None)
                 break
 
+        # Find district
+        district = None
         for i in range(len(words)):
             new_string = ' '.join(words[-(i + 1):])
-            remain = words[:len(words) - (i + 1)]
-
-            if province is not None:
-                result_sub = self.find_best_match(new_string, 'district', province.districts)
-            else:
-                result_sub = self.find_best_match(new_string, 'district', None)
-
-            if result_sub:  # If a match is found
-                words = remain
-                result['district'] = result_sub
-                for district in province.districts.values():
-                    if district.name == result_sub:
-                        district = district
-                        break
+            district_match = self.find_best_match(new_string, 'district',
+                                                  province.districts if province else None)
+            if district_match:
+                result['district'] = district_match
+                words = words[:len(words) - (i + 1)]
+                district = next((d for d in (province.districts.values() if province else [])
+                                 if d.name == district_match), None)
                 break
 
-        if result['district'] is None:
-            for i in range(len(words)):
-                new_string = ' '.join(words[-(i + 1):])
-                remain = words[:len(words) - (i + 1)]
-
-                result_sub = self.find_best_match(new_string, 'district', None)
-
-                if result_sub:  # If a match is found
-                    words = remain
-                    result['district'] = result_sub
-                    for district in province.districts.values():
-                        if district.name == result_sub:
-                            district = district
-                            break
-                    break
-
+        # Find ward
         for i in range(len(words)):
             new_string = ' '.join(words[-(i + 1):])
-            remain = words[:len(words) - (i + 1)]
-
-            if district is not None:
-                result_sub = self.find_best_match(new_string, 'ward', district.wards)
-            else:
-                result_sub = self.find_best_match(new_string, 'ward', None)
-
-            if result_sub:  # If a match is found
-                words = remain
-                result['ward'] = result_sub
+            ward_match = self.find_best_match(new_string, 'ward',
+                                              district.wards if district else None)
+            if ward_match:
+                result['ward'] = ward_match
                 break
 
-        if result['ward'] is None:
-            for i in range(len(words)):
-                new_string = ' '.join(words[-(i + 1):])
-                remain = words[:len(words) - (i + 1)]
+        self.cache[input_address] = result
+        return result
 
-                result_sub = self.find_best_match(new_string, 'ward', None)
-
-                if result_sub:  # If a match is found
-                    words = remain
-                    result['ward'] = result_sub
-                    break
-
-        if result['province'] is None:
-            result['province'] = ''
-
-        if result['district'] is None:
-            result['district'] = ''
-
-        if result['ward'] is None:
-            result['ward'] = ''
-
-        output = {
-            'province': result['province'],
-            'district': result['district'],
-            'ward': result['ward']
-        }
-        self.cache[input_address] = output
-        return output
-
-    def clean_address(self, address):
-        # Expanded replacements for administrative units
-        replacements = {
-            # City/Province prefixes
-            'TP.': ' ', 'TP ': ' ', 'ThP ': ' ', 'Thành Phố ': ' ', 'Thành phố ': ' ', 'thành phố ': ' ',
-            'Tnh': ' ', 'TỉnhC': ' ',
-            'tỉnh ': ' ', 'Tỉnh ': ' ', 'tp.': ' ', 'tp ': ' ', 'T ': ' ',
-
-            # District prefixes
-            'Quận ': ' ', 'Quận': ' ', 'Q.': ' ', 'Q ': ' ',
-            'quận': ' ',
-            'Huyện ': ' ', 'H.': ' ', 'H ': ' ', 'huyện ': ' ',
-            'Huyện': ' ', 'huyện': ' ',
-
-            # Ward/Commune prefixes
-            'Thị Trấn ': ' ', 'thị trấn ': ' ', 'Thị Trấn': ' ',  'thị trấn': ' ', 'Thị trấn': ' ', 'TT.': ' ', 'TT ': ' ',
-            'Thị Xã ': ' ', 'thị xã ': ' ', 'TX.': ' ', 'TX ': ' ', 'Thị xã ': ' ',
-            'Phường ': ' ', 'phường ': ' ', 'Ph.': ' ', 'P.': ' ', 'P ': ' ', 'F ': ' ', 'f ': ' ', 'F. ': ' ',
-            'F.': ' ', 'f': ' ', 'f.': ' ',
-            'Xã ': ' ', 'Xã': ' ', 'xã ': ' ', 'xã': ' ', 'X.': ' ', 'X ': ' ', 'x.': ' ',
-
-            # Common punctuation
-            '.': ' ', ',': ' ', '-': ' ', '_': ' ',
-
-            # Common typos or variations
-            'Phuong ': ' ', 'phuong ': ' ',
-            'Xa ': ' ', 'xa ': ' ',
-            'Huyen ': ' ', 'huyen ': ' ',
-            'Tinh ': ' ', 'tinh ': ' '
-        }
-
-        admin_indicators = r'^.*?(Thị\s*[Tt]rấn|TT|Phường|P|Ph?|[Xx]ã)\.?\s+'
-        match = re.search(admin_indicators, address, re.IGNORECASE)
-        if match:
-            address = address[match.end():].strip()
-
-        # Apply basic replacements
-        cleaned = address
-        for old, new in replacements.items():
-            cleaned = cleaned.replace(old, new)
-
-        # Replace P followed by number (P1 -> 1)
-        cleaned = re.sub(r'P\.?\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'Phường\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'Ph\.?\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'p\.?\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'phường\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'ph\.?\s*(\d+)', r'\1', cleaned)
-
-        # Replace Q followed by number (Q3 -> 3)
-        cleaned = re.sub(r'Q\.?\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'Quận\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'q\.?\s*(\d+)', r'\1', cleaned)
-        cleaned = re.sub(r'quận\s*(\d+)', r'\1', cleaned)
-
-        # Remove multiple spaces and trim
-        cleaned = ' '.join(cleaned.split())
-
-        return cleaned
-
-    def load_own_file(self, xa_file, huyen_file, tinh_file):
+    def load_own_file(self, xa_file: str, huyen_file: str, tinh_file: str):
+        """Load hierarchical address data"""
         # Load provinces
         with open(tinh_file, 'r', encoding='utf-8') as file:
             for line in file:
@@ -320,48 +334,20 @@ class AddressMatcher:
         with open(huyen_file, 'r', encoding='utf-8') as file:
             for line in file:
                 id, name, code, province_id = line.strip().split(';')
-                district = District(id, name, code, province_id)
                 if province_id in self.provinces:
-                    self.provinces[province_id].districts[id] = district
+                    self.provinces[province_id].districts[id] = District(id, name, code, province_id)
 
         # Load wards
         with open(xa_file, 'r', encoding='utf-8') as file:
             for line in file:
                 id, name, code, district_id = line.strip().split(';')
                 ward = Ward(id, name, code, district_id)
-                # Find the province that contains this district
                 for province in self.provinces.values():
                     if district_id in province.districts:
                         province.districts[district_id].wards[id] = ward
                         break
 
 
-class Ward:
-    def __init__(self, id, name, code, district_id):
-        self.id = id
-        self.name = name
-        self.code = code
-        self.district_id = district_id
-
-
-class District:
-    def __init__(self, id, name, code, province_id):
-        self.id = id
-        self.name = name
-        self.code = code
-        self.province_id = province_id
-        self.wards = {}  # Dictionary to store wards
-
-
-class Province:
-    def __init__(self, id, name, code):
-        self.id = id
-        self.name = name
-        self.code = code
-        self.districts = {}  # Dictionary to store districts
-
-
-# Helper function to load test cases
 def load_test_cases(filename):
     with open(filename, 'r', encoding='utf-8') as f:
         return json.load(f)
