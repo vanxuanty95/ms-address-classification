@@ -1,8 +1,11 @@
 HN,Hà Nội
 H.Nội,Hà Nội
+HNội,Hà Nội
+HàNội,Hà Nội
 HCM,Hồ Chí Minh
 TPHCM,Hồ Chí Minh
 H.C.Minh,Hồ Chí Minh
+HôChíMinh,Hồ Chí Minh
 SG,Hồ Chí Minh
 HP,Hải Phòng
 H.Phòng,Hải Phòng
@@ -115,6 +118,8 @@ TH,Thanh Hóa
 T.Hóa,Thanh Hóa
 TTH,Thừa Thiên Huế
 TT.Huế,Thừa Thiên Huế
+Thừa.t.Huế,Thừa Thiên Huế
+T.T.H,Thừa Thiên Huế
 TG,Tiền Giang
 T.Giang,Tiền Giang
 T Giang,Tiền Giang

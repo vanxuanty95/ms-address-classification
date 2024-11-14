@@ -37,6 +37,81 @@ class Province:
         self.districts = {}
 
 
+class TrieNode:
+    def __init__(self):
+        self.children = {}
+        self.is_end = False
+        self.word = None
+        self.suggestions = set()  # Store similar words
+
+
+class Trie:
+    def __init__(self):
+        self.root = TrieNode()
+
+    def insert(self, word: str, original: str):
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+            # Store similar words at each node
+            if len(node.suggestions) < 10:  # Limit suggestions
+                node.suggestions.add(original)
+        node.is_end = True
+        node.word = original
+
+    def search_similar(self, word: str, max_distance: int = 2) -> list:
+        def _search_recursive(node, prefix, remaining_word, distance):
+            results = set()
+
+            # If we've reached end and distance is acceptable
+            if not remaining_word and node.is_end and distance <= max_distance:
+                results.add((node.word, distance))
+
+            # If we've exceeded max distance, stop this branch
+            if distance > max_distance:
+                return results
+
+            # Handle insertion
+            if remaining_word:
+                char = remaining_word[0]
+                rest = remaining_word[1:]
+
+                # Match current character
+                if char in node.children:
+                    results.update(_search_recursive(node.children[char],
+                                                     prefix + char,
+                                                     rest,
+                                                     distance))
+
+                # Try deletion
+                results.update(_search_recursive(node,
+                                                 prefix,
+                                                 rest,
+                                                 distance + 1))
+
+                # Try substitution
+                for c in node.children:
+                    if c != char:
+                        results.update(_search_recursive(node.children[c],
+                                                         prefix + c,
+                                                         rest,
+                                                         distance + 1))
+
+            # Try insertion
+            for c in node.children:
+                results.update(_search_recursive(node.children[c],
+                                                 prefix + c,
+                                                 remaining_word,
+                                                 distance + 1))
+
+            return results
+
+        return sorted(_search_recursive(self.root, "", word, 0),
+                      key=lambda x: x[1])  # Sort by distance
+
+
 class AddressMatcher:
     # Vietnamese character mappings
     VIET_CHARS = {
@@ -57,23 +132,23 @@ class AddressMatcher:
 
     # Address cleaning replacements
     REPLACEMENTS = {
-        'TP.': ' ', 'TP ': ' ', 'ThP ': ' ', 'Thành Phố ': ' ', 'Thành phố ': ' ', 'thành phố ': ' ',
-        'Thà6nh phố': ' ','Tỉnh': ' ','t.P': ' ','T.P': ' ','T0P': ' ',
+        'TP.': ' ', 'TP ': ' ', 'ThP ': ' ', 'Thành Phố ': ' ', 'Thành phố ': ' ', 'thành phố ': ' ', 'T.Phw': ' ',
+        'Thà6nh phố': ' ', 'Tỉnh': ' ', 't.P': ' ', 'T.P': ' ', 'T0P': ' ', 'TỉnhV': ' ', 'Tỉnwh': ' ', 'Thành phô': ' ',
         'Tnh': ' ', 'TỉnhC': ' ', 'tỉnh ': ' ', 'Tỉnh ': ' ', 'tp.': ' ', 'tp ': ' ', 'T ': ' ',
         'Quận ': ' ', 'Quận': ' ', 'Q.': ' ', 'Q ': ' ', 'quận': ' ',
         'Huyện ': ' ', 'H.': ' ', 'H ': ' ', 'huyện ': ' ', 'Huyện': ' ', 'huyện': ' ',
-        'hyện': ' ','HZuyện': ' ','Huyên': ' ','Huzyen': ' ','h ': ' ',
+        'hyện': ' ', 'HZuyện': ' ', 'Huyên': ' ', 'Huzyen': ' ', 'h ': ' ',
         'Thị Trấn ': ' ', 'thị trấn ': ' ', 'Thị Trấn': ' ', 'thị trấn': ' ', 'Thị trấn': ' ', 'TT.': ' ', 'TT ': ' ',
         'Thi trấ ': ' ',
-        'Thị Xã ': ' ', 'thị xã ': ' ', 'TX.': ' ', 'TX ': ' ', 'Thị xã ': ' ','T.X': ' ',
+        'Thị Xã ': ' ', 'thị xã ': ' ', 'TX.': ' ', 'TX ': ' ', 'Thị xã ': ' ', 'T.X': ' ',
         'Phường ': ' ', 'phường ': ' ', 'Ph.': ' ', 'P.': ' ', 'P ': ' ', 'F ': ' ', 'f ': ' ', 'F. ': ' ',
         'Phường': ' ',
-        'F.': ' ', 'f': ' ', 'f.': ' ','F': ' ',
+        'F.': ' ', 'f': ' ', 'f.': ' ', 'F': ' ',
         'Xã ': ' ', 'Xã': ' ', 'xã ': ' ', 'xã': ' ', 'X.': ' ', 'X ': ' ', 'x.': ' ', 'x ': ' ',
         'Phuong ': ' ', 'phuong ': ' ', 'Xa ': ' ', 'xa ': ' ',
         'Huyen ': ' ', 'huyen ': ' ', 'Tinh ': ' ', 'tinh ': ' ',
 
-         '.': ' ', ',': ' ', '-': ' ', '_': ' ',
+        '.': ' ', ',': ' ', '-': ' ', '_': ' ',
     }
 
     def __init__(self, xa_file: str, huyen_file: str, tinh_file: str):
@@ -88,6 +163,15 @@ class AddressMatcher:
         self.provinces = {}
         self.cache = {}
         self.abbreviations = self._load_abbreviations()
+
+        self.province_trie = Trie()
+        self.district_trie = Trie()
+        self.ward_trie = Trie()
+        self.tries = {
+            'province': self.province_trie,
+            'district': self.district_trie,
+            'ward': self.ward_trie
+        }
 
         # Precompile regex patterns
         self.admin_indicators = re.compile(r'^.*?(Thị\s*[Tt]rấn|TT|Phường|P|Ph?|[Xx]ã)\.?\s+')
@@ -139,6 +223,8 @@ class AddressMatcher:
             for item in self.data[level]:
                 norm_item = self.normalize(item)
                 self.length_maps[level][len(norm_item)].append((item, norm_item))
+                # Add to trie
+                self.tries[level].insert(norm_item, item)
 
     @lru_cache(maxsize=10000)
     def normalize(self, text: str) -> str:
@@ -167,7 +253,7 @@ class AddressMatcher:
             previous_row = current_row
         return previous_row[-1]
 
-    def find_best_match(self, part: str, level: str, in_scope) -> Optional[str]:
+    def find_best_match_v3(self, part: str, level: str, in_scope) -> Optional[str]:
         """Find best matching address component"""
         normalized_part = self.normalize(part)
 
@@ -176,64 +262,19 @@ class AddressMatcher:
             normalized_items = {self.normalize(item.name): item.name for item in in_scope.values()}
             if normalized_part in normalized_items:
                 return normalized_items[normalized_part]
+
+        # Use trie for fuzzy matching
+        if in_scope is not None:
+            # Build temporary trie for in_scope items
+            temp_trie = Trie()
+            for item in in_scope.values():
+                temp_trie.insert(self.normalize(item.name), item.name)
+            matches = temp_trie.search_similar(normalized_part, max_distance=2)
         else:
-            if normalized_part in self.length_maps[level]:
-                return self.length_maps[level]
+            matches = self.tries[level].search_similar(normalized_part, max_distance=2)
 
-        # Fall back to fuzzy matching
-        candidates = []
-        items_to_check = in_scope.values() if in_scope is not None else self.data[level]
-
-        for item in items_to_check:
-            item_name = item.name if in_scope is not None else item
-            normalized_item = self.normalize(item_name)
-
-
-            if abs(len(normalized_part) - len(normalized_item)) > 2:
-                continue
-
-            score = self.levenshtein_distance(normalized_part, normalized_item)
-            max_length = max(len(normalized_part), len(normalized_item))
-            similarity = (max_length - score) / max_length * 100
-
-            if similarity >= 80:
-                candidates.append({
-                    'item': item_name,
-                    'score': score,
-                    'similarity': similarity
-                })
-
-        if candidates:
-            candidates.sort(key=lambda x: (x['score'], -x['similarity']))
-            return candidates[0]['item']
-
-        # move to stress search
-        normalized_part = self.normalize(part)
-        part_length = len(normalized_part)
-        candidates = []
-
-        # Only check items with similar lengths (±2)
-        for length in range(part_length - 2, part_length + 3):
-            # Get items of this length from our precomputed map
-            for item, normalized_item in self.length_maps[level][length]:
-                score = self.levenshtein_distance(normalized_part, normalized_item)
-                max_length = max(part_length, length)
-                similarity = (max_length - score) / max_length * 100
-
-                if similarity >= 80:
-                    candidates.append({
-                        'item': item,
-                        'score': score,
-                        'similarity': similarity
-                    })
-
-                # Optional: Early return if we find a perfect match
-                if similarity == 100:
-                    return item
-
-        if candidates:
-            candidates.sort(key=lambda x: (x['score'], -x['similarity']))
-            return candidates[0]['item']
+        if matches:
+            return matches[0][0]  # Return the closest match
 
         return None
 
@@ -274,10 +315,10 @@ class AddressMatcher:
             return result
         except TimeoutError:
             return {
-            'province': 'overtime',
-            'district': '',
-            'ward': ''
-        }
+                'province': 'overtime',
+                'district': '',
+                'ward': ''
+            }
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
 
@@ -299,10 +340,10 @@ class AddressMatcher:
         province = None
         for i in range(len(words)):
             new_string = ' '.join(words[-(i + 1):])
-            if len(new_string) <= 7:
+            if len(new_string) <= 9:
                 new_string = self.abbreviations.get(new_string, new_string)
 
-            province_match = self.find_best_match(new_string, 'province', None)
+            province_match = self.find_best_match_v3(new_string, 'province', None)
             if province_match:
                 result['province'] = province_match
                 words = words[:len(words) - (i + 1)]
@@ -313,8 +354,8 @@ class AddressMatcher:
         district = None
         for i in range(len(words)):
             new_string = ' '.join(words[-(i + 1):])
-            district_match = self.find_best_match(new_string, 'district',
-                                                  province.districts if province else None)
+            district_match = self.find_best_match_v3(new_string, 'district',
+                                                    province.districts if province else None)
             if district_match:
                 result['district'] = district_match
                 words = words[:len(words) - (i + 1)]
@@ -325,8 +366,8 @@ class AddressMatcher:
         # Find ward
         for i in range(len(words)):
             new_string = ' '.join(words[-(i + 1):])
-            ward_match = self.find_best_match(new_string, 'ward',
-                                              district.wards if district else None)
+            ward_match = self.find_best_match_v3(new_string, 'ward',
+                                                district.wards if district else None)
             if ward_match:
                 result['ward'] = ward_match
                 break
